@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="author" content="Janhvi Pandya">
+<meta name="description" content="CSC 466 course project: how delay and packet loss affect input delay in a VNC remote desktop.">
+<title>How Remote Desktops Hold Up on Bad Networks | CSC 466 Project</title>
+<style>
+  :root { --text: #1f2328; --muted: #57606a; --line: #d0d7de; --soft: #f6f8fa; --accent: #0b5cad; }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--text); background: #fff; font: 16px/1.65 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 24px; }
+  header { border-bottom: 1px solid var(--line); padding: 40px 0 18px; }
+  h1 { font-size: 2em; line-height: 1.2; margin: 0 0 6px; }
+  .subtitle { font-size: 1.15em; color: var(--muted); margin: 0 0 12px; }
+  .meta { margin: 0; color: var(--muted); font-size: 0.95em; }
+  nav { margin-top: 14px; font-size: 0.92em; }
+  nav a { margin-right: 16px; }
+  main { padding-bottom: 40px; }
+  h2 { font-size: 1.4em; margin: 2.2em 0 0.6em; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 1.08em; margin: 1.5em 0 0.4em; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .keypoints { background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 14px 20px; margin: 18px 0; }
+  .keypoints p { margin: 0 0 6px; font-weight: 600; }
+  .keypoints ul { margin: 0; padding-left: 20px; }
+  figure { margin: 24px 0; }
+  figure img, figure svg { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px; }
+  figcaption { font-size: 0.88em; color: var(--muted); margin-top: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.93em; margin: 14px 0; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  code { font-family: SFMono-Regular, Consolas, "Liberation Mono", monospace; font-size: 0.88em; background: var(--soft); padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--soft); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-size: 0.88em; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  .note { font-size: 0.9em; color: var(--muted); }
+  .log { list-style: none; padding: 0; margin: 0; }
+  .log li { padding: 8px 0; border-bottom: 1px solid var(--soft); }
+  .log .date { display: inline-block; min-width: 72px; font-weight: 600; }
+  footer { border-top: 1px solid var(--line); padding: 16px 0 40px; font-size: 0.85em; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>How Remote Desktops Hold Up on Bad Networks</h1>
+    <p class="subtitle">Delay vs. Packet Loss in VNC</p>
+    <p class="meta">Janhvi Pandya &middot; CSC 466 Course Project &middot; University of Victoria, Fall 2026</p>
+    <nav>
+      <a href="#summary">Summary</a>
+      <a href="#setup">Setup</a>
+      <a href="#method">Method</a>
+      <a href="#results">Results</a>
+      <a href="#limitations">Limitations</a>
+      <a href="#updates">Updates</a>
+      <a href="#files">Files and code</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h2 id="summary">Summary</h2>
+<p>When a remote desktop feels slow, the cause could be distance (delay), a weak connection (packet loss), or both. This project separates those causes in a controlled testbed and measures what a user actually feels: the time between pressing a key and seeing the result on the screen.</p>
+<p>VNC uses the RFB protocol over a single TCP connection. If one TCP segment is lost, the data behind it cannot be delivered to the application until the lost segment is retransmitted (head-of-line blocking). My hypothesis is that delay and loss hurt a remote desktop in different ways: delay makes every response later by about the same amount (steady lag), while loss leaves most responses fast but causes occasional long stalls (freezes).</p>
+
+<div class="keypoints">
+  <p>Results so far (100 trials per condition)</p>
+  <ul>
+    <li>Added delay increased input delay by almost exactly the added round-trip time (+98 ms for 50 ms each way, +300 ms for 150 ms each way).</li>
+    <li>Packet loss up to 10% left the median almost unchanged (30.4 to 32.8 ms, vs. 33.4 ms with no loss).</li>
+    <li>Loss did cause stalls: the slowest trial was 230 ms at 1% loss, 240 ms at 5%, and 1520 ms at 10%, where at least 1 in 10 trials took 230 ms or more.</li>
+  </ul>
+</div>
+
+<h2 id="setup">Setup</h2>
+<p>Everything runs on one Ubuntu system (WSL2). The VNC server and the client each run in their own Linux network namespace, connected by a virtual ethernet (veth) pair. <code>tc netem</code> is attached to both ends of the link, so both directions are affected: key events travel from the client to the server, and screen updates travel back.</p>
+
+<figure>
+<svg viewBox="0 0 760 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Testbed: server and client namespaces connected by a veth link with netem on both ends" font-family="Helvetica, Arial, sans-serif" font-size="13">
+  <rect x="0" y="0" width="760" height="250" fill="#ffffff"/>
+  <text x="380" y="26" text-anchor="middle" font-size="14" fill="#57606a">One Ubuntu system (WSL2)</text>
+  <rect x="20" y="40" width="250" height="180" rx="6" fill="#f6f8fa" stroke="#8c959f"/>
+  <text x="145" y="64" text-anchor="middle" font-weight="bold" fill="#1f2328">server namespace</text>
+  <text x="145" y="84" text-anchor="middle" fill="#57606a">10.0.0.1</text>
+  <rect x="45" y="100" width="200" height="34" rx="4" fill="#fff" stroke="#c8cdd2"/>
+  <text x="145" y="122" text-anchor="middle" fill="#1f2328">TigerVNC (Xvnc) + Xfce</text>
+  <rect x="45" y="146" width="200" height="34" rx="4" fill="#fff" stroke="#c8cdd2"/>
+  <text x="145" y="168" text-anchor="middle" fill="#1f2328">flip.py (black / white square)</text>
+  <rect x="490" y="40" width="250" height="180" rx="6" fill="#f6f8fa" stroke="#8c959f"/>
+  <text x="615" y="64" text-anchor="middle" font-weight="bold" fill="#1f2328">client namespace</text>
+  <text x="615" y="84" text-anchor="middle" fill="#57606a">10.0.0.2</text>
+  <rect x="515" y="100" width="200" height="34" rx="4" fill="#fff" stroke="#c8cdd2"/>
+  <text x="615" y="122" text-anchor="middle" fill="#1f2328">measure.py (RFB client)</text>
+  <rect x="515" y="146" width="200" height="34" rx="4" fill="#fff" stroke="#c8cdd2"/>
+  <text x="615" y="168" text-anchor="middle" fill="#1f2328">VNC viewer (optional)</text>
+  <line x1="270" y1="130" x2="490" y2="130" stroke="#57606a" stroke-width="3"/>
+  <rect x="262" y="118" width="16" height="24" fill="#0b5cad"/>
+  <rect x="482" y="118" width="16" height="24" fill="#0b5cad"/>
+  <text x="380" y="120" text-anchor="middle" fill="#1f2328">veth pair</text>
+  <text x="380" y="160" text-anchor="middle" fill="#0b5cad">netem on both ends</text>
+  <text x="380" y="178" text-anchor="middle" fill="#57606a">(delay, loss)</text>
+  <text x="380" y="96" text-anchor="middle" fill="#57606a">&#8592; key event</text>
+  <text x="380" y="202" text-anchor="middle" fill="#57606a">screen update &#8594;</text>
+</svg>
+<figcaption>Figure 1. Testbed. The blue blocks mark where netem is applied (the egress queue of each veth end).</figcaption>
+</figure>
+
+<p>netem only acts on packets leaving an interface, which is why it is applied on both ends. I checked this with ping: 100 ms on each end gave a round-trip time of 200.4 to 201.3 ms (mdev 0.4 ms), and 5% loss on each end gave 7.5% ping loss over 40 pings. The expected value is about 9.75% (1 &minus; 0.95&sup2;), since either the request or the reply can be dropped.</p>
+
+<h2 id="method">Method</h2>
+
+<h3>Measuring input delay</h3>
+<p>A small Tk app (<code>flip.py</code>) runs full screen in the remote desktop and flips a 100&times;100 pixel square between black and white on every key press. The measuring script (<code>measure.py</code>) runs in the client namespace and speaks RFB directly, so no viewer or desktop OS on the client side is involved in the timing. One trial:</p>
+<ol>
+  <li>Send an RFB <code>KeyEvent</code> (space pressed and released) and a <code>FramebufferUpdateRequest</code> for a 10&times;10 patch inside the square, and start a timer.</li>
+  <li>The key event crosses the link; the server delivers it to <code>flip.py</code>, which flips the square.</li>
+  <li>The server sends a <code>FramebufferUpdate</code> for the patch back across the link.</li>
+  <li>The script decodes the patch, sees the colour change, and stops the timer.</li>
+</ol>
+<p>Both timestamps come from the same clock, so no clock synchronisation is needed. Some details:</p>
+<ul>
+  <li>The client sets <code>TCP_NODELAY</code> so small messages are sent immediately.</li>
+  <li>It requests 32-bit true colour and Raw encoding, so the patch colour can be read directly.</li>
+  <li>The watched patch sits up and to the left of the screen centre, because the server draws the mouse pointer at the centre.</li>
+  <li>The first 3 trials of every run are discarded as warm-up (the first packet after setup is slower because of the ARP lookup).</li>
+  <li>There is a random 0.2 to 0.4 s pause between trials, and a trial times out after 10 s.</li>
+</ul>
+
+<h3>Calibration</h3>
+<p>With no added delay the median input delay was 31.3 ms. With 50 ms added each way it was 137.2 ms. The increase of 105.9 ms is close to the expected 100 ms, so the tool measures what it should.</p>
+
+<h3>Conditions</h3>
+<table>
+  <tr><th>Set</th><th>netem settings (each way)</th><th>Trials</th><th>Status</th></tr>
+  <tr><td>Delay</td><td>0, 25, 50, 100, 150 ms</td><td>100 each</td><td>Done</td></tr>
+  <tr><td>Loss</td><td>1, 2, 5, 10%</td><td>100 each</td><td>Done</td></tr>
+  <tr><td>Delay + loss</td><td>25 ms with 1, 2, 5% loss</td><td>100 each</td><td>Next</td></tr>
+  <tr><td>Matched pair</td><td>Loss vs. a delay with a similar median</td><td>100 each</td><td>Next</td></tr>
+  <tr><td>Jitter, bandwidth</td><td>Smaller set from the original plan</td><td></td><td>If time allows</td></tr>
+</table>
+
+<h2 id="results">Results so far</h2>
+
+<table>
+  <tr><th>Condition (each way)</th><th class="num">Median (ms)</th><th class="num">90th percentile (ms)</th><th class="num">Fastest (ms)</th><th class="num">Slowest (ms)</th></tr>
+  <tr><td>No added delay or loss</td><td class="num">33.4</td><td class="num">45.4</td><td class="num">21.3</td><td class="num">86.4</td></tr>
+  <tr><td>Delay 25 ms</td><td class="num">82.6</td><td class="num">88.1</td><td class="num">71.0</td><td class="num">90.9</td></tr>
+  <tr><td>Delay 50 ms</td><td class="num">131.8</td><td class="num">138.8</td><td class="num">120.2</td><td class="num">142.5</td></tr>
+  <tr><td>Delay 100 ms</td><td class="num">232.7</td><td class="num">240.2</td><td class="num">220.4</td><td class="num">243.8</td></tr>
+  <tr><td>Delay 150 ms</td><td class="num">333.8</td><td class="num">340.3</td><td class="num">322.7</td><td class="num">348.7</td></tr>
+  <tr><td>Loss 1%</td><td class="num">32.8</td><td class="num">40.0</td><td class="num">20.2</td><td class="num">229.6</td></tr>
+  <tr><td>Loss 2%</td><td class="num">31.7</td><td class="num">39.6</td><td class="num">20.3</td><td class="num">44.3</td></tr>
+  <tr><td>Loss 5%</td><td class="num">30.4</td><td class="num">37.5</td><td class="num">21.3</td><td class="num">240.1</td></tr>
+  <tr><td>Loss 10%</td><td class="num">32.0</td><td class="num">233.6</td><td class="num">21.5</td><td class="num">1520.4</td></tr>
+</table>
+<p class="note">Table 1. Input delay per condition, 100 trials each, from the sweep run on November 9.</p>
+
+<figure>
+  <img src="images/graph1_delay_vs_loss.png" alt="Median and range of input delay for each delay and loss condition">
+  <figcaption>Figure 2. Median input delay (dot) and fastest to slowest trial (line) for each condition. Log scale.</figcaption>
+</figure>
+
+<h3>Delay</h3>
+<p>Added delay shifted the whole distribution by almost exactly the added round-trip time: +49 ms for 25 ms each way, +98 ms for 50 ms, +199 ms for 100 ms and +300 ms for 150 ms (compared by median). With added delay, the gap between the fastest and slowest trial stayed between 20 and 26 ms. The no-delay baseline was wider (21 to 86 ms), so with delay added the responses were later but very consistent.</p>
+
+<figure>
+  <img src="images/graph2_loss_cdf.png" alt="CDF of input delay for the baseline and loss runs">
+  <figcaption>Figure 3. Distribution (CDF) of input delay for the baseline and the loss runs.</figcaption>
+</figure>
+
+<h3>Loss</h3>
+<p>Packet loss barely moved the median, but it added stalls. The slowest trials at 1% and 5% loss (230 and 240 ms) are close to 200 ms, which is Linux TCP's minimum retransmission timeout (RTO) added on top of the normal response time. At 10% loss the 90th percentile was 234 ms, so at least 1 in 10 trials stalled, and the slowest trial took 1.52 s. That is consistent with the RTO doubling after repeated losses of the same data (exponential backoff), but I have not confirmed this with a packet capture yet.</p>
+<p>There were fewer stalls than I expected at low loss, and none in the 2% run. My working guess is that with an almost-zero base RTT, Linux recovers many single losses quickly (for example through a tail loss probe), so only some losses fall back to the full RTO. The delay plus loss runs and a packet capture will test this.</p>
+
+<h2 id="limitations">Limitations</h2>
+<ul>
+  <li>The server and client share one machine and CPU. The no-delay baseline (median 33.4 ms) shows this floor, and every condition is compared against it.</li>
+  <li>A veth pair with netem has no real Wi-Fi or router behaviour, so these results show the effect of delay and loss on their own.</li>
+  <li>The time a viewer takes to draw the update on screen is not included. It is about the same under every network condition, so it does not affect the comparisons.</li>
+  <li>The VNC server runs without a password (<code>-SecurityTypes None</code>) to keep the measuring client simple. Port 5901 is only reachable inside the private namespaces.</li>
+  <li>Loss is random, so results vary between runs. Important conditions will be repeated.</li>
+</ul>
+
+<h2 id="updates">Updates</h2>
+<ul class="log">
+  <li><span class="date">Nov 16</span> Posted the updated proposal with first results and the plan for the rest of the term.</li>
+  <li><span class="date">Nov 9</span> Calibrated the measurement tool and ran the delay and loss sweeps (100 trials per condition).</li>
+  <li><span class="date">Nov 8</span> Testbed working: namespaces, veth pair and netem checked with ping; VNC server and client connecting across the link. Started with plain VNC (TigerVNC) as the first system.</li>
+  <li><span class="date">October</span> Posted the project proposal.</li>
+</ul>
+
+<h2 id="next">Next steps</h2>
+<ul>
+  <li>Delay plus loss runs, and a direct comparison of loss against a delay with a similar median.</li>
+  <li>A packet capture during loss runs to confirm when stalls come from the RTO.</li>
+  <li>A smaller jitter and bandwidth set.</li>
+  <li>If time allows: a second system (RDP), or replaying a real Starlink latency trace.</li>
+</ul>
+
+<h2 id="files">Files and code</h2>
+<ul>
+  <li><a href="proposal.pdf">Project proposal (October)</a></li>
+  <li><a href="updated_proposal.pdf">Updated proposal (November 16)</a></li>
+</ul>
+<table>
+  <tr><th>Script</th><th>What it does</th></tr>
+  <tr><td><a href="code/setup.sh">setup.sh</a></td><td>Builds the two namespaces and the veth pair, starts Xvnc and the Xfce desktop, and checks that the server answers</td></tr>
+  <tr><td><a href="code/net.sh">net.sh</a></td><td>Sets delay, loss, or both with netem on both ends of the link</td></tr>
+  <tr><td><a href="code/flip.py">flip.py</a></td><td>Full-screen app in the remote desktop that flips the square on each key press</td></tr>
+  <tr><td><a href="code/measure.py">measure.py</a></td><td>RFB client that measures input delay and saves one CSV per condition</td></tr>
+  <tr><td><a href="code/sweep.sh">sweep.sh</a></td><td>Runs every condition one after another</td></tr>
+  <tr><td><a href="code/plot_results.py">plot_results.py</a></td><td>Makes the graphs from the CSV files</td></tr>
+  <tr><td><a href="code/viewer.sh">viewer.sh</a></td><td>Opens a VNC viewer from the client namespace (optional, for watching)</td></tr>
+</table>
+
+<h3>Reproducing the results</h3>
+<pre><code>sudo ./setup.sh
+sudo ip netns exec server sudo -u $USER env DISPLAY=127.0.0.1:1 python3 flip.py &amp;
+./sweep.sh 100
+python3 plot_results.py</code></pre>
+<p class="note">Raw results (one CSV per condition) are in the <a href="results/">results</a> folder of the repository.</p>
+
+<h2 id="references">References</h2>
+<ol>
+  <li>T. Richardson, Q. Stafford-Fraser, K. R. Wood, and A. Hopper, "Virtual Network Computing," <i>IEEE Internet Computing</i>, vol. 2, no. 1, 1998.</li>
+  <li>A. M. Lai and J. Nieh, "On the Performance of Wide-Area Thin-Client Computing," <i>ACM Transactions on Computer Systems</i>, vol. 24, no. 2, 2006.</li>
+  <li>N. Tolia, D. G. Andersen, and M. Satyanarayanan, "Quantifying Interactive User Experience on Thin Clients," <i>IEEE Computer</i>, vol. 39, no. 3, 2006.</li>
+  <li>B. Staehle, A. Binzenh&ouml;fer, D. Schlosser, and B. Boder, "<a href="https://www.vde-verlag.de/proceedings-de/563090012.html">Quantifying the Influence of Network Conditions on the Service Quality Experienced by a Thin Client User</a>," MMB 2008, Dortmund, Germany, 2008.</li>
+  <li>Z. Meng et al., "<a href="https://www.usenix.org/conference/nsdi24/presentation/meng">Hairpin: Rethinking Packet Loss Recovery in Edge-based Interactive Video Streaming</a>," USENIX NSDI 2024.</li>
+  <li>tc-netem(8), Linux manual page, <a href="https://man7.org/linux/man-pages/man8/tc-netem.8.html">man7.org/linux/man-pages/man8/tc-netem.8.html</a></li>
+</ol>
+
+</main>
+
+<footer>
+  <div class="wrap">Janhvi Pandya &middot; CSC 466 course project, University of Victoria, Fall 2026</div>
+</footer>
+
+</body>
+</html>
